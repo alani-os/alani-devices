@@ -29,10 +29,10 @@ pub use interrupt::{
     InterruptKind, InterruptPolicy, InterruptQueue, InterruptStatus, MAX_INTERRUPT_VECTOR,
 };
 pub use registry::{
-    Device, DeviceCall, DeviceCallResult, DeviceDescriptor, DeviceHandle, DeviceOpenRequest,
-    DeviceRegistry, DeviceState, DeviceStatus, MockDevice, RegistryDescriptor,
-    DEVICE_CALL_FLAG_NONBLOCKING, DEVICE_CALL_FLAG_TRACE_REQUIRED, DEVICE_CALL_KNOWN_FLAGS,
-    INVALID_DEVICE_ID, MAX_DEVICE_CALL_BUFFER_LEN,
+    Device, DeviceCall, DeviceCallBudget, DeviceCallResult, DeviceDescriptor, DeviceHandle,
+    DeviceOpenRequest, DeviceProvenance, DeviceRegistry, DeviceState, DeviceStatus, DeviceUsage,
+    MockDevice, RegistryDescriptor, DEVICE_CALL_FLAG_NONBLOCKING, DEVICE_CALL_FLAG_TRACE_REQUIRED,
+    DEVICE_CALL_KNOWN_FLAGS, INVALID_DEVICE_ID, MAX_DEVICE_CALL_BUFFER_LEN,
 };
 
 /// Repository name.
@@ -40,6 +40,9 @@ pub const REPOSITORY: &str = "alani-devices";
 
 /// Crate version.
 pub const VERSION: &str = "0.1.0";
+
+/// Machine-readable devices contract schema version.
+pub const DEVICES_SCHEMA_VERSION: &str = "alani.devices.v1";
 
 /// Public module names exposed by this crate.
 pub const MODULES: &[&str] = &["registry", "interrupt", "dma", "classes"];
@@ -151,6 +154,8 @@ pub enum DeviceError {
     InvalidTrace,
     /// Device reported a fault.
     Faulted,
+    /// Sensitive or secret payload metadata was not redacted or policy-approved.
+    SensitiveData,
     /// Internal invariant failed.
     Internal,
 }
@@ -179,6 +184,7 @@ impl DeviceError {
             Self::CapacityExceeded => "capacity_exceeded",
             Self::InvalidTrace => "invalid_trace",
             Self::Faulted => "faulted",
+            Self::SensitiveData => "sensitive_data",
             Self::Internal => "internal",
         }
     }
@@ -196,6 +202,7 @@ impl DeviceError {
                 | Self::DmaPolicyViolation
                 | Self::InvalidInterrupt
                 | Self::Faulted
+                | Self::SensitiveData
         )
     }
 }
@@ -292,6 +299,75 @@ impl DataClass {
     }
 }
 
+/// Redaction state for device call payloads and diagnostic metadata.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RedactionState {
+    /// Public data is present.
+    Public = 0,
+    /// Operational metadata is present.
+    Operational = 1,
+    /// Sensitive or secret content has been redacted.
+    Redacted = 2,
+    /// Sensitive content is present under an explicit policy approval.
+    PolicyApprovedSensitive = 3,
+    /// Sensitive or secret content is present without approval.
+    UnredactedSensitive = 4,
+}
+
+impl RedactionState {
+    /// Stable redaction label.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Operational => "operational",
+            Self::Redacted => "redacted",
+            Self::PolicyApprovedSensitive => "policy_approved_sensitive",
+            Self::UnredactedSensitive => "unredacted_sensitive",
+        }
+    }
+}
+
+/// Validates redaction metadata for a classified payload.
+pub const fn validate_redaction(
+    data_class: DataClass,
+    redaction: RedactionState,
+) -> DeviceResult<()> {
+    match data_class {
+        DataClass::Public => {
+            if matches!(redaction, RedactionState::Public) {
+                Ok(())
+            } else {
+                Err(DeviceError::SensitiveData)
+            }
+        }
+        DataClass::Operational => {
+            if matches!(redaction, RedactionState::Operational) {
+                Ok(())
+            } else {
+                Err(DeviceError::SensitiveData)
+            }
+        }
+        DataClass::Sensitive => {
+            if matches!(
+                redaction,
+                RedactionState::Redacted | RedactionState::PolicyApprovedSensitive
+            ) {
+                Ok(())
+            } else {
+                Err(DeviceError::SensitiveData)
+            }
+        }
+        DataClass::Secret => {
+            if matches!(redaction, RedactionState::Redacted) {
+                Ok(())
+            } else {
+                Err(DeviceError::SensitiveData)
+            }
+        }
+    }
+}
+
 /// Trace context for long-running or cross-repository device operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TraceContext {
@@ -332,6 +408,11 @@ impl TraceContext {
             parent_span_id: self.span_id,
             flags: self.flags,
         }
+    }
+
+    /// Returns `true` when both trace and span identifiers are present.
+    pub const fn is_present(self) -> bool {
+        self.trace_id != 0 && self.span_id != 0
     }
 
     /// Validates trace metadata.
@@ -397,6 +478,8 @@ pub struct DevicesCatalog {
     pub repository: &'static str,
     /// Crate version.
     pub version: &'static str,
+    /// Device contract schema version.
+    pub schema_version: &'static str,
     /// Feature bitmap.
     pub features: u64,
     /// Number of built-in device classes.
@@ -412,6 +495,7 @@ impl DevicesCatalog {
     pub const CURRENT: Self = Self {
         repository: REPOSITORY,
         version: VERSION,
+        schema_version: DEVICES_SCHEMA_VERSION,
         features: DEVICES_KNOWN_FEATURES,
         class_count: BUILTIN_DEVICE_CLASSES.len(),
         operation_count: DEVICE_OPERATION_COUNT,
@@ -425,7 +509,7 @@ impl DevicesCatalog {
 
     /// Validates catalog metadata.
     pub const fn validate(self) -> DeviceResult<()> {
-        if self.repository.is_empty() || self.version.is_empty() {
+        if self.repository.is_empty() || self.version.is_empty() || self.schema_version.is_empty() {
             return Err(DeviceError::MissingField);
         }
         if self.features & !DEVICES_KNOWN_FEATURES != 0

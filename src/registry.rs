@@ -7,8 +7,8 @@ use crate::classes::{
 use crate::dma::DmaPolicy;
 use crate::interrupt::InterruptPolicy;
 use crate::{
-    DataClass, DeviceError, DeviceResult, DeviceRights, TraceContext, DEVICE_RIGHT_CALL,
-    DEVICE_RIGHT_OPEN,
+    validate_redaction, DataClass, DeviceError, DeviceResult, DeviceRights, RedactionState,
+    TraceContext, DEVICE_RIGHT_CALL, DEVICE_RIGHT_OPEN,
 };
 
 /// Invalid device identifier.
@@ -361,6 +361,137 @@ impl<'a> DeviceOpenRequest<'a> {
     }
 }
 
+/// Budget carried by bounded cognitive device operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceCallBudget {
+    /// Maximum compute units the caller authorizes.
+    pub max_compute_units: u64,
+    /// Maximum memory bytes the caller authorizes.
+    pub max_memory_bytes: u64,
+    /// Optional deadline in nanoseconds from the caller's scheduling domain.
+    pub deadline_ns: u64,
+}
+
+impl DeviceCallBudget {
+    /// No explicit budget.
+    pub const NONE: Self = Self {
+        max_compute_units: 0,
+        max_memory_bytes: 0,
+        deadline_ns: 0,
+    };
+
+    /// Creates a budget.
+    pub const fn new(max_compute_units: u64, max_memory_bytes: u64, deadline_ns: u64) -> Self {
+        Self {
+            max_compute_units,
+            max_memory_bytes,
+            deadline_ns,
+        }
+    }
+
+    /// Returns `true` when at least one resource limit is set.
+    pub const fn has_limit(self) -> bool {
+        self.max_compute_units != 0 || self.max_memory_bytes != 0
+    }
+
+    /// Validates budget consistency.
+    pub const fn validate(self) -> DeviceResult<()> {
+        if self.deadline_ns != 0 && !self.has_limit() {
+            return Err(DeviceError::InvalidOperation);
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic usage metadata returned by device calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceUsage {
+    /// Compute units consumed.
+    pub compute_units: u64,
+    /// Memory bytes consumed or touched.
+    pub memory_bytes: u64,
+}
+
+impl DeviceUsage {
+    /// Empty usage metadata.
+    pub const EMPTY: Self = Self {
+        compute_units: 0,
+        memory_bytes: 0,
+    };
+
+    /// Creates usage metadata.
+    pub const fn new(compute_units: u64, memory_bytes: u64) -> Self {
+        Self {
+            compute_units,
+            memory_bytes,
+        }
+    }
+
+    /// Returns `true` when usage metadata contains any non-zero value.
+    pub const fn is_present(self) -> bool {
+        self.compute_units != 0 || self.memory_bytes != 0
+    }
+}
+
+/// Provenance metadata for a device-call result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceProvenance {
+    /// Device identifier that produced the result.
+    pub device_id: u64,
+    /// Handle generation used for the call.
+    pub generation: u32,
+    /// Deterministic per-device result sequence.
+    pub sequence: u64,
+    /// Trace identifier associated with the call.
+    pub trace_id: u64,
+}
+
+impl DeviceProvenance {
+    /// Empty provenance metadata for operations where provenance is not relevant.
+    pub const EMPTY: Self = Self {
+        device_id: 0,
+        generation: 0,
+        sequence: 0,
+        trace_id: 0,
+    };
+
+    /// Creates provenance metadata.
+    pub const fn new(device_id: u64, generation: u32, sequence: u64, trace_id: u64) -> Self {
+        Self {
+            device_id,
+            generation,
+            sequence,
+            trace_id,
+        }
+    }
+
+    /// Creates provenance metadata from a call envelope and result sequence.
+    pub const fn from_call(call: DeviceCall, sequence: u64) -> Self {
+        Self {
+            device_id: call.handle.device_id,
+            generation: call.handle.generation,
+            sequence,
+            trace_id: call.trace.trace_id,
+        }
+    }
+
+    /// Returns `true` when provenance metadata is present.
+    pub const fn is_present(self) -> bool {
+        self.device_id != 0 || self.generation != 0 || self.sequence != 0 || self.trace_id != 0
+    }
+
+    /// Validates provenance metadata.
+    pub const fn validate(self) -> DeviceResult<()> {
+        if !self.is_present() {
+            return Ok(());
+        }
+        if self.device_id == 0 || self.generation == 0 || self.sequence == 0 {
+            return Err(DeviceError::InvalidDevice);
+        }
+        Ok(())
+    }
+}
+
 /// Common device call envelope for userspace and kernel-mediated calls.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeviceCall {
@@ -374,8 +505,12 @@ pub struct DeviceCall {
     pub output_len: u64,
     /// Call flags.
     pub flags: u32,
+    /// Optional budget for bounded cognitive operations.
+    pub budget: DeviceCallBudget,
     /// Payload data classification.
     pub data_class: DataClass,
+    /// Payload redaction state.
+    pub redaction: RedactionState,
     /// Trace context.
     pub trace: TraceContext,
 }
@@ -389,7 +524,9 @@ impl DeviceCall {
             input_len: 0,
             output_len: 0,
             flags: 0,
+            budget: DeviceCallBudget::NONE,
             data_class: DataClass::Operational,
+            redaction: RedactionState::Operational,
             trace: TraceContext::EMPTY,
         }
     }
@@ -415,6 +552,12 @@ impl DeviceCall {
         self
     }
 
+    /// Sets cognitive-operation budget metadata.
+    pub const fn with_budget(mut self, budget: DeviceCallBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
     /// Sets trace context.
     pub const fn with_trace(mut self, trace: TraceContext) -> Self {
         self.trace = trace;
@@ -424,6 +567,17 @@ impl DeviceCall {
     /// Sets data class.
     pub const fn with_data_class(mut self, data_class: DataClass) -> Self {
         self.data_class = data_class;
+        self
+    }
+
+    /// Sets payload classification and redaction metadata.
+    pub const fn with_data_handling(
+        mut self,
+        data_class: DataClass,
+        redaction: RedactionState,
+    ) -> Self {
+        self.data_class = data_class;
+        self.redaction = redaction;
         self
     }
 
@@ -445,6 +599,22 @@ impl DeviceCall {
             && (self.trace.trace_id == 0 || self.trace.span_id == 0)
         {
             return Err(DeviceError::InvalidTrace);
+        }
+        match self.budget.validate() {
+            Ok(()) => {}
+            Err(error) => return Err(error),
+        }
+        if self.operation.requires_budget() {
+            if !self.budget.has_limit() {
+                return Err(DeviceError::MissingField);
+            }
+            if !self.trace.is_present() {
+                return Err(DeviceError::InvalidTrace);
+            }
+        }
+        match validate_redaction(self.data_class, self.redaction) {
+            Ok(()) => {}
+            Err(error) => return Err(error),
         }
         match self.handle.rights.require(self.operation.required_rights()) {
             Ok(()) => {}
@@ -489,6 +659,10 @@ pub struct DeviceCallResult {
     pub status: DeviceStatus,
     /// Output bytes written.
     pub bytes_written: u64,
+    /// Usage metadata for bounded or metered operations.
+    pub usage: DeviceUsage,
+    /// Provenance metadata for generated or retrieved results.
+    pub provenance: DeviceProvenance,
     /// Whether an audit event should be emitted.
     pub audit_required: bool,
     /// Whether bottom-half or task-context work remains.
@@ -501,6 +675,8 @@ impl DeviceCallResult {
         Self {
             status: DeviceStatus::Ok,
             bytes_written,
+            usage: DeviceUsage::EMPTY,
+            provenance: DeviceProvenance::EMPTY,
             audit_required,
             deferred: false,
         }
@@ -511,9 +687,23 @@ impl DeviceCallResult {
         Self {
             status: DeviceStatus::Unsupported,
             bytes_written: 0,
+            usage: DeviceUsage::EMPTY,
+            provenance: DeviceProvenance::EMPTY,
             audit_required,
             deferred: false,
         }
+    }
+
+    /// Sets usage metadata.
+    pub const fn with_usage(mut self, usage: DeviceUsage) -> Self {
+        self.usage = usage;
+        self
+    }
+
+    /// Sets provenance metadata.
+    pub const fn with_provenance(mut self, provenance: DeviceProvenance) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     /// Validates result metadata.
@@ -527,7 +717,7 @@ impl DeviceCallResult {
         if self.bytes_written > MAX_DEVICE_CALL_BUFFER_LEN {
             return Err(DeviceError::BufferTooLarge);
         }
-        Ok(())
+        self.provenance.validate()
     }
 }
 
@@ -621,10 +811,11 @@ impl Device for MockDevice<'_> {
         call.validate_against(self.descriptor)?;
         self.call_count += 1;
         let bytes_written = output_bytes_for(call.operation, call.output_len);
-        Ok(DeviceCallResult::ok(
-            bytes_written,
-            self.descriptor.audit_required,
-        ))
+        Ok(
+            DeviceCallResult::ok(bytes_written, self.descriptor.audit_required)
+                .with_usage(usage_for(call))
+                .with_provenance(DeviceProvenance::from_call(call, self.call_count)),
+        )
     }
 
     fn close(&mut self, handle: DeviceHandle) -> DeviceResult<()> {
@@ -847,4 +1038,22 @@ fn output_bytes_for(operation: DeviceOperation, output_len: u64) -> u64 {
         | DeviceOperation::Send => 0,
         _ => core::cmp::min(output_len, 32),
     }
+}
+
+fn usage_for(call: DeviceCall) -> DeviceUsage {
+    if !call.operation.requires_budget() {
+        return DeviceUsage::EMPTY;
+    }
+    let compute_units = if call.budget.max_compute_units == 0 {
+        0
+    } else {
+        core::cmp::min(call.budget.max_compute_units, 1)
+    };
+    let requested_memory = call.input_len.saturating_add(call.output_len);
+    let memory_bytes = if call.budget.max_memory_bytes == 0 {
+        requested_memory
+    } else {
+        core::cmp::min(call.budget.max_memory_bytes, requested_memory)
+    };
+    DeviceUsage::new(compute_units, memory_bytes)
 }

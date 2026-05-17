@@ -1,12 +1,12 @@
 use alani_devices::{
     builtin_class_descriptor, devices_catalog, ComponentStatus, DataClass, Device, DeviceCall,
-    DeviceCapabilities, DeviceClass, DeviceDescriptor, DeviceError, DeviceHandle,
+    DeviceCallBudget, DeviceCapabilities, DeviceClass, DeviceDescriptor, DeviceError, DeviceHandle,
     DeviceOpenRequest, DeviceOperation, DeviceOperationSet, DeviceRegistry, DeviceRights,
     DmaAddressSpace, DmaBuffer, DmaDirection, DmaMapping, DmaPolicy, InterruptAck,
     InterruptBinding, InterruptEvent, InterruptKind, InterruptPolicy, InterruptQueue,
-    InterruptStatus, MockDevice, TraceContext, DEVICES_CATALOG, DEVICES_FEATURE_DMA,
-    DEVICES_KNOWN_FEATURES, DEVICE_RIGHT_CALL, DEVICE_RIGHT_COGNITION, DEVICE_RIGHT_MEMORY_WRITE,
-    DEVICE_RIGHT_OPEN,
+    InterruptStatus, MockDevice, RedactionState, TraceContext, DEVICES_CATALOG,
+    DEVICES_FEATURE_DMA, DEVICES_KNOWN_FEATURES, DEVICE_RIGHT_CALL, DEVICE_RIGHT_COGNITION,
+    DEVICE_RIGHT_MEMORY_WRITE, DEVICE_RIGHT_OPEN,
 };
 
 fn rights(bits: u64) -> DeviceRights {
@@ -23,6 +23,10 @@ fn cognitive_memory_rights() -> DeviceRights {
     )
 }
 
+fn cognitive_budget() -> DeviceCallBudget {
+    DeviceCallBudget::new(10, 4096, 1_000_000)
+}
+
 #[test]
 fn repository_identity_and_catalog_are_stable() {
     let info = alani_devices::component_info();
@@ -35,6 +39,10 @@ fn repository_identity_and_catalog_are_stable() {
         &["registry", "interrupt", "dma", "classes"]
     );
     assert_eq!(devices_catalog(), DEVICES_CATALOG);
+    assert_eq!(
+        devices_catalog().schema_version,
+        alani_devices::DEVICES_SCHEMA_VERSION
+    );
     assert_eq!(devices_catalog().validate(), Ok(()));
     assert_eq!(
         devices_catalog().features & DEVICES_FEATURE_DMA,
@@ -105,7 +113,12 @@ fn registry_prevents_duplicates_and_gates_open_and_calls() {
 
     assert_eq!(registry.validate_call(read), Ok(()));
     assert_eq!(
-        registry.validate_call(DeviceCall::new(handle, DeviceOperation::Infer).with_buffers(8, 16)),
+        registry.validate_call(
+            DeviceCall::new(handle, DeviceOperation::Infer)
+                .with_buffers(8, 16)
+                .with_budget(cognitive_budget())
+                .with_trace(TraceContext::root(10, 22))
+        ),
         Err(DeviceError::UnsupportedOperation)
     );
     assert_eq!(
@@ -135,7 +148,12 @@ fn mock_console_runs_deterministically_without_side_effects_on_unsupported_ops()
     assert!(result.audit_required);
     assert_eq!(device.call_count, 1);
     assert_eq!(
-        device.call(DeviceCall::new(handle, DeviceOperation::Infer).with_buffers(8, 16)),
+        device.call(
+            DeviceCall::new(handle, DeviceOperation::Infer)
+                .with_buffers(8, 16)
+                .with_budget(cognitive_budget())
+                .with_trace(TraceContext::root(12, 1))
+        ),
         Err(DeviceError::UnsupportedOperation)
     );
     assert_eq!(device.call_count, 1);
@@ -232,15 +250,58 @@ fn cognitive_device_classes_and_mock_memory_cover_mvk_paths() {
             cognitive_memory_rights().union(DeviceRights::DMA),
         ))
         .unwrap();
-    let put = DeviceCall::new(handle, DeviceOperation::MemoryPut).with_buffers(32, 0);
-    let get = DeviceCall::new(handle, DeviceOperation::MemoryGet).with_buffers(0, 32);
+    let put = DeviceCall::new(handle, DeviceOperation::MemoryPut)
+        .with_buffers(32, 0)
+        .with_budget(cognitive_budget())
+        .with_trace(TraceContext::root(91, 1));
+    let get = DeviceCall::new(handle, DeviceOperation::MemoryGet)
+        .with_buffers(0, 32)
+        .with_budget(cognitive_budget())
+        .with_trace(TraceContext::root(91, 2));
 
-    assert_eq!(memory_device.call(put).unwrap().bytes_written, 0);
-    assert_eq!(memory_device.call(get).unwrap().bytes_written, 32);
+    let put_result = memory_device.call(put).unwrap();
+    let get_result = memory_device.call(get).unwrap();
+    assert_eq!(put_result.bytes_written, 0);
+    assert_eq!(put_result.usage.memory_bytes, 32);
+    assert_eq!(put_result.provenance.device_id, 8);
+    assert_eq!(get_result.bytes_written, 32);
+    assert_eq!(get_result.usage.compute_units, 1);
+    assert_eq!(get_result.provenance.sequence, 2);
     assert_eq!(memory_device.call_count, 2);
     assert_eq!(
         DeviceCall::from_opcode(handle, 999),
         Err(DeviceError::UnsupportedOperation)
     );
     assert!(DeviceError::DmaPolicyViolation.is_security_relevant());
+}
+
+#[test]
+fn cognitive_calls_require_budget_trace_and_redaction_metadata() {
+    let handle = DeviceHandle::new(8, DeviceClass::Memory, cognitive_memory_rights(), 1);
+    let missing_budget = DeviceCall::new(handle, DeviceOperation::MemoryGet)
+        .with_buffers(0, 32)
+        .with_trace(TraceContext::root(100, 1));
+    let missing_trace = DeviceCall::new(handle, DeviceOperation::MemoryGet)
+        .with_buffers(0, 32)
+        .with_budget(cognitive_budget());
+    let sensitive_unredacted = DeviceCall::new(handle, DeviceOperation::MemoryGet)
+        .with_buffers(0, 32)
+        .with_budget(cognitive_budget())
+        .with_trace(TraceContext::root(100, 2))
+        .with_data_handling(DataClass::Sensitive, RedactionState::UnredactedSensitive);
+    let sensitive_redacted = DeviceCall::new(handle, DeviceOperation::MemoryGet)
+        .with_buffers(0, 32)
+        .with_budget(cognitive_budget())
+        .with_trace(TraceContext::root(100, 3))
+        .with_data_handling(DataClass::Sensitive, RedactionState::Redacted);
+
+    assert_eq!(missing_budget.validate(), Err(DeviceError::MissingField));
+    assert_eq!(missing_trace.validate(), Err(DeviceError::InvalidTrace));
+    assert_eq!(
+        sensitive_unredacted.validate(),
+        Err(DeviceError::SensitiveData)
+    );
+    assert_eq!(sensitive_redacted.validate(), Ok(()));
+    assert!(DeviceOperation::Infer.requires_budget());
+    assert!(DeviceError::SensitiveData.is_security_relevant());
 }

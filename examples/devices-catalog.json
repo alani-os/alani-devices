@@ -1,0 +1,119 @@
+{
+  "schema_version": "alani.devices.v1",
+  "repository": "alani-devices",
+  "version": "0.1.0",
+  "modules": [
+    "registry",
+    "interrupt",
+    "dma",
+    "classes"
+  ],
+  "classes": [
+    {
+      "class": "console",
+      "operations": ["open", "close", "read", "write", "poll", "health"],
+      "capabilities": ["read", "write", "poll"],
+      "open_rights": ["open", "call"],
+      "mock_supported": true
+    },
+    {
+      "class": "timer",
+      "operations": ["open", "close", "poll", "health"],
+      "capabilities": ["poll", "interrupt"],
+      "open_rights": ["open", "call"],
+      "mock_supported": true
+    },
+    {
+      "class": "block",
+      "operations": ["open", "close", "block_read", "block_write", "health"],
+      "capabilities": ["read", "write", "block_io", "dma", "poll"],
+      "open_rights": ["open", "call", "dma"],
+      "mock_supported": true
+    },
+    {
+      "class": "entropy",
+      "operations": ["open", "close", "entropy_read", "health"],
+      "capabilities": ["read", "entropy"],
+      "open_rights": ["open", "call"],
+      "mock_supported": true
+    },
+    {
+      "class": "network-sim",
+      "operations": ["open", "close", "receive", "send", "poll", "health"],
+      "capabilities": ["read", "write", "poll", "interrupt", "stream"],
+      "open_rights": ["open", "call"],
+      "mock_supported": true
+    },
+    {
+      "class": "sensor-sim",
+      "operations": ["open", "close", "read", "poll", "health"],
+      "capabilities": ["read", "poll", "interrupt"],
+      "open_rights": ["open", "call"],
+      "mock_supported": true
+    },
+    {
+      "class": "accelerator",
+      "operations": [
+        "open",
+        "close",
+        "submit_graph",
+        "submit_tensor",
+        "read_result",
+        "reset",
+        "health"
+      ],
+      "capabilities": ["read", "write", "cognitive", "accelerator", "dma", "interrupt"],
+      "open_rights": ["open", "call", "cognition", "dma"],
+      "mock_supported": true
+    },
+    {
+      "class": "memory",
+      "operations": [
+        "open",
+        "close",
+        "put_record",
+        "get_record",
+        "query_vector",
+        "compact",
+        "snapshot",
+        "verify_snapshot"
+      ],
+      "capabilities": ["read", "write", "cognitive", "memory", "dma"],
+      "open_rights": ["open", "call", "cognition", "memory_write"],
+      "mock_supported": true
+    },
+    {
+      "class": "audit-storage",
+      "operations": ["open", "close", "audit_append", "audit_flush", "health"],
+      "capabilities": ["write", "audit_storage", "dma"],
+      "open_rights": ["open", "call", "audit_append"],
+      "mock_supported": true
+    },
+    {
+      "class": "model",
+      "operations": [
+        "open",
+        "close",
+        "list_models",
+        "load_model",
+        "unload_model",
+        "infer",
+        "cancel",
+        "inspect_metadata"
+      ],
+      "capabilities": ["read", "write", "cognitive"],
+      "open_rights": ["open", "call", "cognition"],
+      "mock_supported": true
+    }
+  ],
+  "dma_policies": ["disabled", "bounce_buffer", "pinned", "iommu_required"],
+  "interrupt_policies": ["none", "optional", "required", "poll_only"],
+  "data_classes": ["public", "operational", "sensitive", "secret"],
+  "redaction_states": [
+    "public",
+    "operational",
+    "redacted",
+    "policy_approved_sensitive",
+    "unredacted_sensitive"
+  ]
+}

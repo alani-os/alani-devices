@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Alani Devices Catalog",
+  "description": "Machine-readable schema metadata for alani.devices.v1 device contracts.",
+  "x-alani-schema-version": "alani.devices.v1",
+  "x-alani-repository": "alani-devices",
+  "x-alani-modules": [
+    "registry",
+    "interrupt",
+    "dma",
+    "classes"
+  ],
+  "x-alani-device-classes": [
+    "console",
+    "timer",
+    "block",
+    "entropy",
+    "network-sim",
+    "sensor-sim",
+    "accelerator",
+    "memory",
+    "audit-storage",
+    "model"
+  ],
+  "x-alani-operations": [
+    "open",
+    "close",
+    "read",
+    "write",
+    "poll",
+    "reset",
+    "health",
+    "block_read",
+    "block_write",
+    "entropy_read",
+    "list_models",
+    "load_model",
+    "unload_model",
+    "infer",
+    "cancel",
+    "inspect_metadata",
+    "put_record",
+    "get_record",
+    "query_vector",
+    "compact",
+    "snapshot",
+    "verify_snapshot",
+    "submit_graph",
+    "submit_tensor",
+    "read_result",
+    "audit_append",
+    "audit_flush",
+    "receive",
+    "send"
+  ],
+  "x-alani-capabilities": [
+    "read",
+    "write",
+    "poll",
+    "interrupt",
+    "dma",
+    "stream",
+    "block_io",
+    "entropy",
+    "cognitive",
+    "memory",
+    "accelerator",
+    "audit_storage"
+  ],
+  "x-alani-rights": [
+    "list",
+    "open",
+    "call",
+    "dma",
+    "interrupt",
+    "admin",
+    "cognition",
+    "memory_write",
+    "audit_append"
+  ],
+  "x-alani-dma-policies": [
+    "disabled",
+    "bounce_buffer",
+    "pinned",
+    "iommu_required"
+  ],
+  "x-alani-interrupt-policies": [
+    "none",
+    "optional",
+    "required",
+    "poll_only"
+  ],
+  "x-alani-data-classes": [
+    "public",
+    "operational",
+    "sensitive",
+    "secret"
+  ],
+  "x-alani-redaction-states": [
+    "public",
+    "operational",
+    "redacted",
+    "policy_approved_sensitive",
+    "unredacted_sensitive"
+  ]
+}

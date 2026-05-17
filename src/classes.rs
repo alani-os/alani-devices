@@ -375,6 +375,33 @@ impl DeviceOperation {
         }
     }
 
+    /// Returns `true` when the operation belongs to a cognitive device path.
+    pub const fn is_cognitive(self) -> bool {
+        matches!(
+            self,
+            Self::ModelList
+                | Self::ModelLoad
+                | Self::ModelUnload
+                | Self::Infer
+                | Self::Cancel
+                | Self::InspectMetadata
+                | Self::MemoryPut
+                | Self::MemoryGet
+                | Self::MemoryQueryVector
+                | Self::MemoryCompact
+                | Self::MemorySnapshot
+                | Self::MemoryVerifySnapshot
+                | Self::AcceleratorSubmitGraph
+                | Self::AcceleratorSubmitTensor
+                | Self::AcceleratorReadResult
+        )
+    }
+
+    /// Returns `true` when the operation must carry explicit budget metadata.
+    pub const fn requires_budget(self) -> bool {
+        self.is_cognitive()
+    }
+
     /// Returns `true` when the operation can be invoked in interrupt top-half context.
     pub const fn allows_interrupt_context(self) -> bool {
         matches!(self, Self::Poll | Self::Health)
